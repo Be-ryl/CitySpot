@@ -5,7 +5,7 @@ import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 
 @MapperScan("com.hmdp.mapper")
-@SpringBootApplication
+@SpringBootApplication //意味着这个是启动类。
 public class HmDianPingApplication {
 
     public static void main(String[] args) {

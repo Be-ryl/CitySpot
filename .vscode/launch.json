@@ -1,0 +1,13 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "java",
+      "name": "启动黑马点评（本地）",
+      "request": "launch",
+      "mainClass": "com.hmdp.HmDianPingApplication",
+      "envFile": "${workspaceFolder}/.env.local",
+      "console": "integratedTerminal"
+    }
+  ]
+}
