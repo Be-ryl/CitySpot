@@ -69,9 +69,10 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
             user = creatUserWithPhone(phone);
         }
     
-        //7.把用户实体类存在保存到session
-            session.setAttribute("user", user);
-        return null;
+        // 7.把用户实体类保存到 session
+        session.setAttribute("user", user);
+        // 8.返回登录成功，前端收到 success=true 后才会跳转到首页
+        return Result.ok();
         
     }
 
