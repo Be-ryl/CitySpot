@@ -3,11 +3,13 @@ package com.hmdp.service.impl;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.hmdp.dto.LoginFormDTO;
 import com.hmdp.dto.Result;
+import com.hmdp.dto.UserDTO;
 import com.hmdp.entity.User;
 import com.hmdp.mapper.UserMapper;
 import com.hmdp.service.IUserService;
 import com.hmdp.utils.RegexUtils;
 
+import cn.hutool.core.bean.BeanUtil;
 import cn.hutool.core.util.RandomUtil;
 import lombok.extern.slf4j.Slf4j;
 
@@ -69,8 +71,8 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
             user = creatUserWithPhone(phone);
         }
     
-        // 7.把用户实体类保存到 session
-        session.setAttribute("user", user);
+        // 7.保存脱敏后的用户信息到 session
+        session.setAttribute("user", BeanUtil.copyProperties(user, UserDTO.class));
         // 8.返回登录成功，前端收到 success=true 后才会跳转到首页
         return Result.ok();
         
