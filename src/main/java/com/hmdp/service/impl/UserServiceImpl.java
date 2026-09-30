@@ -7,15 +7,23 @@ import com.hmdp.dto.UserDTO;
 import com.hmdp.entity.User;
 import com.hmdp.mapper.UserMapper;
 import com.hmdp.service.IUserService;
+import com.hmdp.utils.RedisConstants;
 import com.hmdp.utils.RegexUtils;
 
 import cn.hutool.core.bean.BeanUtil;
+import cn.hutool.core.bean.copier.CopyOptions;
 import cn.hutool.core.util.RandomUtil;
 import lombok.extern.slf4j.Slf4j;
 
-import javax.servlet.http.HttpSession;
 import com.hmdp.utils.SystemConstants;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
+
+import javax.annotation.Resource;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 
 /**
  * <p>
@@ -29,8 +37,11 @@ import org.springframework.stereotype.Service;
 @Service
 public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IUserService {
 
+    @Resource
+    private StringRedisTemplate stringRedisTemplate;
+
     @Override//发送验证码的业务代码
-    public Result sendCode(String phone, HttpSession session) {
+    public Result sendCode(String phone) {
         // 校验手机号
         if (RegexUtils.isPhoneInvalid(phone)) {
             // if里面是true 就意味着确实不符合。那么就返回fail的结果
@@ -38,8 +49,13 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
         }
         // 符合生成验证码
         String code = RandomUtil.randomNumbers(6);
-        // 验证码保存session
-        session.setAttribute("code", code);
+        // 验证码保存到 Redis，并设置 2 分钟有效期
+        stringRedisTemplate.opsForValue().set(
+                RedisConstants.LOGIN_CODE_KEY + phone,
+                code,
+                RedisConstants.LOGIN_CODE_TTL,
+                TimeUnit.MINUTES
+        );
         // 发送验证码,一般要调用阿里云的云平台
         log.debug("发送短信验证码成功，验证码是{}", code);
         // 返回ok
@@ -48,7 +64,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
     }
 
     @Override//登陆+注册业务代码
-    public Result login(LoginFormDTO loginForm, HttpSession session) {
+    public Result login(LoginFormDTO loginForm) {
         // 1.校验手机号
         String phone = loginForm.getPhone();
         if (RegexUtils.isPhoneInvalid(phone)) {
@@ -57,9 +73,10 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
         }
 
         // 2.校验验证码
-        Object cacheCode = session.getAttribute("code");
+        String codeKey = RedisConstants.LOGIN_CODE_KEY + phone;
+        String cacheCode = stringRedisTemplate.opsForValue().get(codeKey);
         String code = loginForm.getCode();
-        if (cacheCode == null || !cacheCode.toString().equals(code)) {
+        if (cacheCode == null || !cacheCode.equals(code)) {
             // 3.不一致，报错
             return Result.fail("验证码错误");
         }
@@ -71,10 +88,31 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
             user = creatUserWithPhone(phone);
         }
     
-        // 7.保存脱敏后的用户信息到 session
-        session.setAttribute("user", BeanUtil.copyProperties(user, UserDTO.class));
-        // 8.返回登录成功，前端收到 success=true 后才会跳转到首页
-        return Result.ok();
+        // 7.生成随机 token，将脱敏后的用户信息保存到 Redis Hash
+        String token = UUID.randomUUID().toString();
+        UserDTO userDTO = BeanUtil.copyProperties(user, UserDTO.class);
+        Map<String, Object> userMap = BeanUtil.beanToMap(
+                userDTO,
+                new HashMap<>(),
+                CopyOptions.create()
+                        .setIgnoreNullValue(true)
+                        .setFieldValueEditor((fieldName, fieldValue) -> fieldValue.toString())
+        );
+        String tokenKey = RedisConstants.LOGIN_USER_KEY + token;
+        stringRedisTemplate.opsForHash().putAll(tokenKey, userMap);
+        Boolean expirationSet = stringRedisTemplate.expire(
+                tokenKey,
+                RedisConstants.LOGIN_USER_TTL,
+                TimeUnit.MINUTES
+        );
+        if (!Boolean.TRUE.equals(expirationSet)) {
+            stringRedisTemplate.delete(tokenKey);
+            return Result.fail("登录失败，请稍后重试");
+        }
+
+        // 8.登录态写入成功后删除本次验证码，防止重复使用
+        stringRedisTemplate.delete(codeKey);
+        return Result.ok(token);
         
     }
 
