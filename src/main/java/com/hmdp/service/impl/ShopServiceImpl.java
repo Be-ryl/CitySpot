@@ -92,13 +92,7 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
 
     private Result queryDatabaseAndRebuildCache(Long id, String key) {
         Shop shop = getById(id);
-        try {
-        Thread.sleep(200); // 模拟查询数据库耗时，测试用
-    } catch (InterruptedException e) {
-        // 恢复中断标记
-        Thread.currentThread().interrupt();
-        return Result.fail("查询被中断");
-    }
+        
         //测试 ，重建演唱时间。
         //缓存空值防止缓存穿透：避免别人反复请求不存在的id，导致每次请求都直接打到数据库。
         if (shop == null) {
