@@ -20,11 +20,17 @@ import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -34,6 +40,7 @@ class ShopServiceImplTest {
 
     private static final Long SHOP_ID = 1L;
     private static final String SHOP_KEY = RedisConstants.CACHE_SHOP_KEY + SHOP_ID;
+    private static final String LOCK_KEY = RedisConstants.LOCK_SHOP_KEY + SHOP_ID;
 
     @Mock
     private StringRedisTemplate stringRedisTemplate;
@@ -72,30 +79,13 @@ class ShopServiceImplTest {
         assertTrue(result.getSuccess());
         assertEquals(cachedShop, result.getData());
         verifyNoInteractions(shopMapper);
-    }
-
-    @Test
-    void redisMissQueriesDatabaseAndCachesShop() {
-        Shop databaseShop = shop();
-        when(valueOperations.get(SHOP_KEY)).thenReturn(null);
-        when(shopMapper.selectById(SHOP_ID)).thenReturn(databaseShop);
-
-        Result result = shopService.queryShopById(SHOP_ID);
-
-        assertTrue(result.getSuccess());
-        assertEquals(databaseShop, result.getData());
-        ArgumentCaptor<String> jsonCaptor = ArgumentCaptor.forClass(String.class);
-        verify(valueOperations).set(
-                eq(SHOP_KEY),
-                jsonCaptor.capture(),
-                eq(RedisConstants.CACHE_SHOP_TTL),
-                eq(TimeUnit.MINUTES)
+        verify(valueOperations, never()).setIfAbsent(
+                anyString(), anyString(), anyLong(), any(TimeUnit.class)
         );
-        assertEquals(databaseShop, JSONUtil.toBean(jsonCaptor.getValue(), Shop.class));
     }
 
     @Test
-    void emptyRedisValueReturnsNotFoundWithoutQueryingDatabase() {
+    void emptyRedisValueReturnsNotFoundWithoutLockingOrQueryingDatabase() {
         when(valueOperations.get(SHOP_KEY)).thenReturn("");
 
         Result result = shopService.queryShopById(SHOP_ID);
@@ -103,11 +93,89 @@ class ShopServiceImplTest {
         assertFalse(result.getSuccess());
         assertEquals("店铺不存在", result.getErrorMsg());
         verifyNoInteractions(shopMapper);
+        verify(valueOperations, never()).setIfAbsent(
+                anyString(), anyString(), anyLong(), any(TimeUnit.class)
+        );
     }
 
     @Test
-    void missingDatabaseShopCachesEmptyValueWithShortTtl() {
-        when(valueOperations.get(SHOP_KEY)).thenReturn(null);
+    void redisMissWithLockQueriesDatabaseCachesShopAndUnlocks() {
+        Shop databaseShop = shop();
+        when(valueOperations.get(SHOP_KEY)).thenReturn(null, null);
+        when(valueOperations.setIfAbsent(
+                LOCK_KEY,
+                "1",
+                RedisConstants.LOCK_SHOP_TTL,
+                TimeUnit.SECONDS
+        )).thenReturn(true);
+        when(shopMapper.selectById(SHOP_ID)).thenReturn(databaseShop);
+
+        Result result = shopService.queryShopById(SHOP_ID);
+
+        assertTrue(result.getSuccess());
+        assertEquals(databaseShop, result.getData());
+        ArgumentCaptor<String> jsonCaptor = ArgumentCaptor.forClass(String.class);
+        ArgumentCaptor<Long> ttlCaptor = ArgumentCaptor.forClass(Long.class);
+        verify(valueOperations).set(
+                eq(SHOP_KEY),
+                jsonCaptor.capture(),
+                ttlCaptor.capture(),
+                eq(TimeUnit.MINUTES)
+        );
+        assertEquals(databaseShop, JSONUtil.toBean(jsonCaptor.getValue(), Shop.class));
+        assertTrue(ttlCaptor.getValue() >= RedisConstants.CACHE_SHOP_TTL);
+        assertTrue(ttlCaptor.getValue()
+                <= RedisConstants.CACHE_SHOP_TTL + ShopServiceImpl.MAX_RANDOM_TTL_MINUTES);
+        verify(stringRedisTemplate).delete(LOCK_KEY);
+    }
+
+    @Test
+    void cacheRebuiltBeforeSecondCheckSkipsDatabaseAndUnlocks() {
+        Shop rebuiltShop = shop().setName("其他线程重建的店铺");
+        when(valueOperations.get(SHOP_KEY)).thenReturn(null, JSONUtil.toJsonStr(rebuiltShop));
+        when(valueOperations.setIfAbsent(
+                LOCK_KEY,
+                "1",
+                RedisConstants.LOCK_SHOP_TTL,
+                TimeUnit.SECONDS
+        )).thenReturn(true);
+
+        Result result = shopService.queryShopById(SHOP_ID);
+
+        assertTrue(result.getSuccess());
+        assertEquals(rebuiltShop, result.getData());
+        verifyNoInteractions(shopMapper);
+        verify(stringRedisTemplate).delete(LOCK_KEY);
+    }
+
+    @Test
+    void failedFirstLockWaitsAndReadsRebuiltCacheWithoutDatabaseQuery() {
+        Shop rebuiltShop = shop().setName("等待期间重建的店铺");
+        when(valueOperations.get(SHOP_KEY)).thenReturn(null, JSONUtil.toJsonStr(rebuiltShop));
+        when(valueOperations.setIfAbsent(
+                LOCK_KEY,
+                "1",
+                RedisConstants.LOCK_SHOP_TTL,
+                TimeUnit.SECONDS
+        )).thenReturn(false);
+
+        Result result = shopService.queryShopById(SHOP_ID);
+
+        assertTrue(result.getSuccess());
+        assertEquals(rebuiltShop, result.getData());
+        verifyNoInteractions(shopMapper);
+        verify(stringRedisTemplate, never()).delete(LOCK_KEY);
+    }
+
+    @Test
+    void missingDatabaseShopCachesEmptyValueWithShortTtlAndUnlocks() {
+        when(valueOperations.get(SHOP_KEY)).thenReturn(null, null);
+        when(valueOperations.setIfAbsent(
+                LOCK_KEY,
+                "1",
+                RedisConstants.LOCK_SHOP_TTL,
+                TimeUnit.SECONDS
+        )).thenReturn(true);
         when(shopMapper.selectById(SHOP_ID)).thenReturn(null);
 
         Result result = shopService.queryShopById(SHOP_ID);
@@ -120,6 +188,71 @@ class ShopServiceImplTest {
                 RedisConstants.CACHE_NULL_TTL,
                 TimeUnit.MINUTES
         );
+        verify(stringRedisTemplate).delete(LOCK_KEY);
+    }
+
+    @Test
+    void databaseExceptionStillReleasesAcquiredLock() {
+        when(valueOperations.get(SHOP_KEY)).thenReturn(null, null);
+        when(valueOperations.setIfAbsent(
+                LOCK_KEY,
+                "1",
+                RedisConstants.LOCK_SHOP_TTL,
+                TimeUnit.SECONDS
+        )).thenReturn(true);
+        when(shopMapper.selectById(SHOP_ID)).thenThrow(new IllegalStateException("database unavailable"));
+
+        assertThrows(IllegalStateException.class, () -> shopService.queryShopById(SHOP_ID));
+
+        verify(stringRedisTemplate).delete(LOCK_KEY);
+    }
+
+    @Test
+    void retryLimitReturnsBusyWithoutQueryingDatabaseOrUnlocking() {
+        when(valueOperations.get(SHOP_KEY)).thenReturn(null);
+        when(valueOperations.setIfAbsent(
+                LOCK_KEY,
+                "1",
+                RedisConstants.LOCK_SHOP_TTL,
+                TimeUnit.SECONDS
+        )).thenReturn(false);
+
+        Result result = shopService.queryShopById(SHOP_ID);
+
+        assertFalse(result.getSuccess());
+        assertEquals("系统繁忙，请稍后重试", result.getErrorMsg());
+        verify(valueOperations, times(ShopServiceImpl.MAX_LOCK_RETRIES)).setIfAbsent(
+                LOCK_KEY,
+                "1",
+                RedisConstants.LOCK_SHOP_TTL,
+                TimeUnit.SECONDS
+        );
+        verifyNoInteractions(shopMapper);
+        verify(stringRedisTemplate, never()).delete(LOCK_KEY);
+    }
+
+    @Test
+    void interruptedLockWaitRestoresInterruptFlagAndReturnsFailure() {
+        when(valueOperations.get(SHOP_KEY)).thenReturn(null);
+        when(valueOperations.setIfAbsent(
+                LOCK_KEY,
+                "1",
+                RedisConstants.LOCK_SHOP_TTL,
+                TimeUnit.SECONDS
+        )).thenReturn(false);
+
+        Thread.currentThread().interrupt();
+        try {
+            Result result = shopService.queryShopById(SHOP_ID);
+
+            assertFalse(result.getSuccess());
+            assertEquals("请求被中断，请稍后重试", result.getErrorMsg());
+            assertTrue(Thread.currentThread().isInterrupted());
+            verifyNoInteractions(shopMapper);
+            verify(stringRedisTemplate, never()).delete(LOCK_KEY);
+        } finally {
+            Thread.interrupted();
+        }
     }
 
     @Test
