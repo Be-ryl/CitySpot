@@ -41,7 +41,7 @@ class RedisIdWorkerTest {
     void nextIdUsesDatedBusinessCounterAndIncreasingSequence() {
         when(valueOperations.increment(anyString())).thenReturn(1L, 2L);
 
-        long firstId = redisIdWorker.nextId("order");
+        long firstId =  redisIdWorker.nextId("order");
         long secondId = redisIdWorker.nextId("order");
 
         assertTrue(firstId > 0);

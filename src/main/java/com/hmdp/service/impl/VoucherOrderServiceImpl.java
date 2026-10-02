@@ -11,6 +11,9 @@ import com.hmdp.service.ISeckillVoucherService;
 import com.hmdp.service.IVoucherOrderService;
 import com.hmdp.utils.RedisIdWorker;
 import com.hmdp.utils.UserHolder;
+import org.redisson.api.RLock;
+import org.redisson.api.RedissonClient;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -34,8 +37,13 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     @Resource
     private RedisIdWorker redisIdWorker;
 
+    @Resource
+    private RedissonClient redissonClient;
+
+    @Resource
+    private ObjectProvider<IVoucherOrderService> voucherOrderServiceProvider;
+
     @Override
-    @Transactional
     public Result seckillVoucher(Long voucherId) {
         if (voucherId == null || voucherId <= 0) {
             return Result.fail("优惠券ID无效");
@@ -65,7 +73,35 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
             return Result.fail("请先登录");
         }
 
-        long orderId = redisIdWorker.nextId("order");
+        Long userId = user.getId();
+        String lockKey = "lock:order:" + userId + ":" + voucherId;
+        RLock lock = redissonClient.getLock(lockKey);
+        if (!lock.tryLock()) {
+            return Result.fail("请求正在处理中，请勿重复下单");
+        }
+
+        try {
+            IVoucherOrderService proxy = voucherOrderServiceProvider.getObject();
+            return proxy.createVoucherOrder(voucherId, userId);
+        } finally {
+            if (lock.isHeldByCurrentThread()) {
+                lock.unlock();
+            }
+        }
+    }
+
+    //两张表的操作最好加事物。
+    @Override
+    @Transactional
+    public Result createVoucherOrder(Long voucherId, Long userId) {
+        int orderCount = query()
+                .eq("user_id", userId)
+                .eq("voucher_id", voucherId)
+                .count();
+        if (orderCount > 0) {
+            return Result.fail("不能重复下单");
+        }
+
         boolean stockUpdated = seckillVoucherService.update(
                 new UpdateWrapper<SeckillVoucher>()
                         .setSql("stock = stock - 1")
@@ -76,9 +112,10 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
             return Result.fail("库存不足");
         }
 
+        long orderId = redisIdWorker.nextId("order");
         VoucherOrder order = new VoucherOrder()
                 .setId(orderId)
-                .setUserId(user.getId())
+                .setUserId(userId)
                 .setVoucherId(voucherId);
         if (!save(order)) {
             throw new IllegalStateException("订单创建失败");

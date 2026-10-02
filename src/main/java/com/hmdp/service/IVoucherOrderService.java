@@ -15,4 +15,6 @@ import com.hmdp.dto.Result;
 public interface IVoucherOrderService extends IService<VoucherOrder> {
 
     Result seckillVoucher(Long voucherId);
+
+    Result createVoucherOrder(Long voucherId, Long userId);
 }
