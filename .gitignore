@@ -32,3 +32,9 @@ replay_pid*
 
 # Local VS Code Java runtime path
 /.vscode/settings.json
+
+# Generated JMeter login data (contains temporary login credentials)
+/load-test/tokens.txt
+/load-test/token-users.csv
+/load-test/token-verification.txt
+/load-test/*.tmp

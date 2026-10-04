@@ -9,6 +9,7 @@ import com.hmdp.entity.VoucherOrder;
 import com.hmdp.mapper.VoucherOrderMapper;
 import com.hmdp.service.ISeckillVoucherService;
 import com.hmdp.service.IVoucherOrderService;
+import com.hmdp.utils.RedisConstants;
 import com.hmdp.utils.RedisIdWorker;
 import com.hmdp.utils.UserHolder;
 import org.junit.jupiter.api.AfterEach;
@@ -22,24 +23,25 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.redisson.api.RLock;
 import org.redisson.api.RedissonClient;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.script.RedisScript;
 import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.lang.reflect.Method;
-import java.time.LocalDateTime;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -50,12 +52,14 @@ class VoucherOrderServiceImplTest {
     private static final Long VOUCHER_ID = 10L;
     private static final Long USER_ID = 20L;
     private static final Long ORDER_ID = 30L;
-    private static final String LOCK_KEY = "lock:order:" + USER_ID + ":" + VOUCHER_ID;
+    private static final String LOCK_KEY = RedisConstants.LOCK_ORDER_KEY + USER_ID + ":" + VOUCHER_ID;
 
     @Mock
     private ISeckillVoucherService seckillVoucherService;
     @Mock
     private RedisIdWorker redisIdWorker;
+    @Mock
+    private StringRedisTemplate stringRedisTemplate;
     @Mock
     private VoucherOrderMapper voucherOrderMapper;
     @Mock
@@ -74,6 +78,7 @@ class VoucherOrderServiceImplTest {
         voucherOrderService = new VoucherOrderServiceImpl();
         ReflectionTestUtils.setField(voucherOrderService, "seckillVoucherService", seckillVoucherService);
         ReflectionTestUtils.setField(voucherOrderService, "redisIdWorker", redisIdWorker);
+        ReflectionTestUtils.setField(voucherOrderService, "stringRedisTemplate", stringRedisTemplate);
         ReflectionTestUtils.setField(voucherOrderService, "baseMapper", voucherOrderMapper);
         ReflectionTestUtils.setField(voucherOrderService, "redissonClient", redissonClient);
         ReflectionTestUtils.setField(
@@ -90,262 +95,232 @@ class VoucherOrderServiceImplTest {
     }
 
     @Test
-    void invalidVoucherIdFailsWithoutDependencies() {
+    void invalidVoucherIdFailsWithoutGeneratingIdOrCallingLua() {
         Result result = voucherOrderService.seckillVoucher(0L);
 
         assertFalse(result.getSuccess());
         assertEquals("优惠券ID无效", result.getErrorMsg());
-        verifyNoInteractions(
-                seckillVoucherService,
-                redisIdWorker,
-                voucherOrderMapper,
-                redissonClient,
-                voucherOrderServiceProvider
-        );
+        verifyNoInteractions(redisIdWorker, stringRedisTemplate, voucherOrderMapper, redissonClient);
     }
 
     @Test
-    void missingSeckillVoucherReturnsClearFailure() {
-        when(seckillVoucherService.getById(VOUCHER_ID)).thenReturn(null);
+    void unauthenticatedUserFailsBeforeGeneratingIdOrCallingLua() {
+        UserHolder.removeUser();
 
         Result result = voucherOrderService.seckillVoucher(VOUCHER_ID);
 
         assertFalse(result.getSuccess());
-        assertEquals("秒杀优惠券不存在", result.getErrorMsg());
-        verifyNoInteractions(redisIdWorker, voucherOrderMapper, redissonClient, voucherOrderServiceProvider);
+        assertEquals("请先登录", result.getErrorMsg());
+        verifyNoInteractions(redisIdWorker, stringRedisTemplate, voucherOrderMapper, redissonClient);
     }
 
     @Test
-    void voucherBeforeBeginTimeCannotBePurchased() {
-        SeckillVoucher voucher = activeVoucher(VOUCHER_ID)
-                .setBeginTime(LocalDateTime.now().plusMinutes(10))
-                .setEndTime(LocalDateTime.now().plusMinutes(20));
-        when(seckillVoucherService.getById(VOUCHER_ID)).thenReturn(voucher);
-
-        Result result = voucherOrderService.seckillVoucher(VOUCHER_ID);
-
-        assertFalse(result.getSuccess());
-        assertEquals("秒杀尚未开始", result.getErrorMsg());
-        verifyNoInteractions(redisIdWorker, voucherOrderMapper, redissonClient, voucherOrderServiceProvider);
-    }
-
-    @Test
-    void voucherAfterEndTimeCannotBePurchased() {
-        SeckillVoucher voucher = activeVoucher(VOUCHER_ID)
-                .setBeginTime(LocalDateTime.now().minusMinutes(20))
-                .setEndTime(LocalDateTime.now().minusMinutes(10));
-        when(seckillVoucherService.getById(VOUCHER_ID)).thenReturn(voucher);
-
-        Result result = voucherOrderService.seckillVoucher(VOUCHER_ID);
-
-        assertFalse(result.getSuccess());
-        assertEquals("秒杀已经结束", result.getErrorMsg());
-        verifyNoInteractions(redisIdWorker, voucherOrderMapper, redissonClient, voucherOrderServiceProvider);
-    }
-
-    @Test
-    void zeroStockCannotBePurchased() {
-        when(seckillVoucherService.getById(VOUCHER_ID)).thenReturn(activeVoucher(VOUCHER_ID).setStock(0));
+    void luaOutOfStockStatusMapsToClearFailure() {
+        stubLuaResult(1L);
 
         Result result = voucherOrderService.seckillVoucher(VOUCHER_ID);
 
         assertFalse(result.getSuccess());
         assertEquals("库存不足", result.getErrorMsg());
-        verifyNoInteractions(redisIdWorker, voucherOrderMapper, redissonClient, voucherOrderServiceProvider);
     }
 
     @Test
-    void failedLockDoesNotQueryOrdersDecrementStockOrCreateOrder() {
-        when(seckillVoucherService.getById(VOUCHER_ID)).thenReturn(activeVoucher(VOUCHER_ID));
-        when(redissonClient.getLock(LOCK_KEY)).thenReturn(lock);
-        when(lock.tryLock()).thenReturn(false);
+    void luaDuplicateStatusMapsToClearFailure() {
+        stubLuaResult(2L);
 
         Result result = voucherOrderService.seckillVoucher(VOUCHER_ID);
 
         assertFalse(result.getSuccess());
-        assertEquals("请求正在处理中，请勿重复下单", result.getErrorMsg());
-        verifyNoInteractions(voucherOrderServiceProvider, voucherOrderMapper, redisIdWorker);
-        verify(seckillVoucherService, never()).update(any(UpdateWrapper.class));
-        verify(lock, never()).unlock();
+        assertEquals("不能重复下单", result.getErrorMsg());
     }
 
     @Test
-    void acquiredLockCallsServiceProxyBeforeUnlocking() {
-        Result expected = Result.ok(ORDER_ID);
-        stubSuccessfulLockAndProxy(expected);
+    @SuppressWarnings("unchecked")
+    void luaSuccessImmediatelyReturnsGeneratedOrderIdWithoutDatabaseOrLock() {
+        stubLuaResult(0L);
 
         Result result = voucherOrderService.seckillVoucher(VOUCHER_ID);
 
-        assertEquals(expected, result);
-        InOrder inOrder = inOrder(voucherOrderServiceProxy, lock);
-        inOrder.verify(voucherOrderServiceProxy).createVoucherOrder(VOUCHER_ID, USER_ID);
-        inOrder.verify(lock).isHeldByCurrentThread();
-        inOrder.verify(lock).unlock();
-        verifyNoInteractions(voucherOrderMapper, redisIdWorker);
+        assertTrue(result.getSuccess());
+        assertEquals(ORDER_ID, result.getData());
+        verifyNoInteractions(voucherOrderMapper, seckillVoucherService, redissonClient, voucherOrderServiceProvider);
+
+        ArgumentCaptor<List<String>> keysCaptor = ArgumentCaptor.forClass(List.class);
+        verify(stringRedisTemplate).execute(
+                any(RedisScript.class),
+                keysCaptor.capture(),
+                eq(VOUCHER_ID.toString()),
+                eq(USER_ID.toString()),
+                eq(ORDER_ID.toString())
+        );
+        assertEquals(
+                java.util.Arrays.asList(
+                        RedisConstants.SECKILL_STOCK_KEY + VOUCHER_ID,
+                        RedisConstants.SECKILL_ORDER_KEY + VOUCHER_ID,
+                        RedisConstants.STREAM_ORDERS_KEY
+                ),
+                keysCaptor.getValue()
+        );
     }
 
     @Test
-    void proxyExceptionStillReleasesCurrentThreadsLock() {
-        when(seckillVoucherService.getById(VOUCHER_ID)).thenReturn(activeVoucher(VOUCHER_ID));
+    void nullLuaResultReturnsSystemBusy() {
+        stubLuaResult(null);
+
+        Result result = voucherOrderService.seckillVoucher(VOUCHER_ID);
+
+        assertFalse(result.getSuccess());
+        assertEquals("系统繁忙，请稍后重试", result.getErrorMsg());
+    }
+
+    @Test
+    void unknownLuaResultReturnsSystemBusy() {
+        stubLuaResult(9L);
+
+        Result result = voucherOrderService.seckillVoucher(VOUCHER_ID);
+
+        assertFalse(result.getSuccess());
+        assertEquals("系统繁忙，请稍后重试", result.getErrorMsg());
+    }
+
+    @Test
+    void alreadyPersistedOrderIdIsIdempotentAndDoesNotDecrementStock() {
+        VoucherOrder order = order();
+        when(voucherOrderMapper.selectById(ORDER_ID)).thenReturn(order);
+
+        voucherOrderService.createVoucherOrder(order);
+
+        verify(voucherOrderMapper, never()).selectCount(any(Wrapper.class));
+        verify(seckillVoucherService, never()).update(any(UpdateWrapper.class));
+        verify(voucherOrderMapper, never()).insert(any(VoucherOrder.class));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void existingUserVoucherOrderIsTerminalAndDoesNotDecrementStock() {
+        when(voucherOrderMapper.selectById(ORDER_ID)).thenReturn(null);
+        when(voucherOrderMapper.selectCount(any(Wrapper.class))).thenReturn(1);
+
+        voucherOrderService.createVoucherOrder(order());
+
+        verify(seckillVoucherService, never()).update(any(UpdateWrapper.class));
+        verify(voucherOrderMapper, never()).insert(any(VoucherOrder.class));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void failedConditionalStockUpdateDoesNotCreateOrderAndThrowsForRetry() {
+        when(voucherOrderMapper.selectById(ORDER_ID)).thenReturn(null);
+        when(voucherOrderMapper.selectCount(any(Wrapper.class))).thenReturn(0);
+        when(seckillVoucherService.update(any(UpdateWrapper.class))).thenReturn(false);
+
+        IllegalStateException exception = assertThrows(
+                IllegalStateException.class,
+                () -> voucherOrderService.createVoucherOrder(order())
+        );
+
+        assertEquals("数据库库存不足，订单暂未落库", exception.getMessage());
+        verify(voucherOrderMapper, never()).insert(any(VoucherOrder.class));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void validMessageUsesOriginalOrderIdAndCreatesOrder() {
+        when(voucherOrderMapper.selectById(ORDER_ID)).thenReturn(null);
+        when(voucherOrderMapper.selectCount(any(Wrapper.class))).thenReturn(0);
+        when(seckillVoucherService.update(any(UpdateWrapper.class))).thenReturn(true);
+        when(voucherOrderMapper.insert(any(VoucherOrder.class))).thenReturn(1);
+
+        VoucherOrder messageOrder = order();
+        voucherOrderService.createVoucherOrder(messageOrder);
+
+        ArgumentCaptor<VoucherOrder> orderCaptor = ArgumentCaptor.forClass(VoucherOrder.class);
+        verify(voucherOrderMapper).insert(orderCaptor.capture());
+        assertEquals(ORDER_ID, orderCaptor.getValue().getId());
+        assertEquals(USER_ID, orderCaptor.getValue().getUserId());
+        assertEquals(VOUCHER_ID, orderCaptor.getValue().getVoucherId());
+        verifyNoInteractions(redisIdWorker);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void failedOrderSaveThrowsFromPublicTransactionalMethod() throws NoSuchMethodException {
+        when(voucherOrderMapper.selectById(ORDER_ID)).thenReturn(null);
+        when(voucherOrderMapper.selectCount(any(Wrapper.class))).thenReturn(0);
+        when(seckillVoucherService.update(any(UpdateWrapper.class))).thenReturn(true);
+        when(voucherOrderMapper.insert(any(VoucherOrder.class))).thenReturn(0);
+
+        assertThrows(IllegalStateException.class, () -> voucherOrderService.createVoucherOrder(order()));
+
+        Method method = VoucherOrderServiceImpl.class.getMethod("createVoucherOrder", VoucherOrder.class);
+        assertTrue(method.isAnnotationPresent(Transactional.class));
+    }
+
+    @Test
+    void asynchronousHandlerCallsTransactionalServiceProxyBeforeUnlocking() {
+        VoucherOrder order = order();
         when(redissonClient.getLock(LOCK_KEY)).thenReturn(lock);
         when(lock.tryLock()).thenReturn(true);
-        when(voucherOrderServiceProvider.getObject()).thenReturn(voucherOrderServiceProxy);
-        when(voucherOrderServiceProxy.createVoucherOrder(VOUCHER_ID, USER_ID))
-                .thenThrow(new IllegalStateException("transaction failed"));
         when(lock.isHeldByCurrentThread()).thenReturn(true);
+        when(voucherOrderServiceProvider.getObject()).thenReturn(voucherOrderServiceProxy);
 
-        assertThrows(IllegalStateException.class, () -> voucherOrderService.seckillVoucher(VOUCHER_ID));
+        voucherOrderService.handleVoucherOrder(order);
+
+        InOrder inOrder = inOrder(voucherOrderServiceProxy, lock);
+        inOrder.verify(voucherOrderServiceProxy).createVoucherOrder(order);
+        inOrder.verify(lock).isHeldByCurrentThread();
+        inOrder.verify(lock).unlock();
+        verifyNoInteractions(voucherOrderMapper, seckillVoucherService);
+    }
+
+    @Test
+    void handlerFailureStillReleasesOwnedLockAndPropagatesForPendingRetry() {
+        VoucherOrder order = order();
+        when(redissonClient.getLock(LOCK_KEY)).thenReturn(lock);
+        when(lock.tryLock()).thenReturn(true);
+        when(lock.isHeldByCurrentThread()).thenReturn(true);
+        when(voucherOrderServiceProvider.getObject()).thenReturn(voucherOrderServiceProxy);
+        doThrow(new IllegalStateException("database failed"))
+                .when(voucherOrderServiceProxy).createVoucherOrder(order);
+
+        assertThrows(IllegalStateException.class, () -> voucherOrderService.handleVoucherOrder(order));
 
         verify(lock).unlock();
     }
 
     @Test
-    void lockIsNotUnlockedWhenCurrentThreadNoLongerOwnsIt() {
-        when(seckillVoucherService.getById(VOUCHER_ID)).thenReturn(activeVoucher(VOUCHER_ID));
+    void lockFailureDoesNotCallTransactionalMethod() {
         when(redissonClient.getLock(LOCK_KEY)).thenReturn(lock);
-        when(lock.tryLock()).thenReturn(true);
-        when(voucherOrderServiceProvider.getObject()).thenReturn(voucherOrderServiceProxy);
-        when(voucherOrderServiceProxy.createVoucherOrder(VOUCHER_ID, USER_ID)).thenReturn(Result.ok(ORDER_ID));
-        when(lock.isHeldByCurrentThread()).thenReturn(false);
+        when(lock.tryLock()).thenReturn(false);
 
-        Result result = voucherOrderService.seckillVoucher(VOUCHER_ID);
+        assertThrows(IllegalStateException.class, () -> voucherOrderService.handleVoucherOrder(order()));
 
-        assertTrue(result.getSuccess());
+        verifyNoInteractions(voucherOrderServiceProvider, voucherOrderMapper, seckillVoucherService);
         verify(lock, never()).unlock();
     }
 
-    @Test
-    void lockKeyIsStableForSamePairAndDifferentForDifferentUserOrVoucher() {
-        when(seckillVoucherService.getById(anyLong()))
-                .thenAnswer(invocation -> activeVoucher(invocation.getArgument(0)));
-        when(redissonClient.getLock(anyString())).thenReturn(lock);
-        when(lock.tryLock()).thenReturn(true);
-        when(lock.isHeldByCurrentThread()).thenReturn(true);
-        when(voucherOrderServiceProvider.getObject()).thenReturn(voucherOrderServiceProxy);
-        when(voucherOrderServiceProxy.createVoucherOrder(anyLong(), anyLong())).thenReturn(Result.ok(ORDER_ID));
-
-        voucherOrderService.seckillVoucher(VOUCHER_ID);
-        voucherOrderService.seckillVoucher(VOUCHER_ID);
-        saveCurrentUser(USER_ID + 1);
-        voucherOrderService.seckillVoucher(VOUCHER_ID);
-        voucherOrderService.seckillVoucher(VOUCHER_ID + 1);
-
-        ArgumentCaptor<String> keyCaptor = ArgumentCaptor.forClass(String.class);
-        verify(redissonClient, times(4)).getLock(keyCaptor.capture());
-        List<String> lockKeys = keyCaptor.getAllValues();
-        assertEquals(LOCK_KEY, lockKeys.get(0));
-        assertEquals(lockKeys.get(0), lockKeys.get(1));
-        assertNotEquals(lockKeys.get(0), lockKeys.get(2));
-        assertNotEquals(lockKeys.get(2), lockKeys.get(3));
-        assertEquals("lock:order:21:10", lockKeys.get(2));
-        assertEquals("lock:order:21:11", lockKeys.get(3));
-    }
-
-    @Test
     @SuppressWarnings("unchecked")
-    void existingOrderReturnsDuplicateFailureWithoutDecrementingStock() {
-        when(voucherOrderMapper.selectCount(any(Wrapper.class))).thenReturn(1);
-
-        Result result = voucherOrderService.createVoucherOrder(VOUCHER_ID, USER_ID);
-
-        assertFalse(result.getSuccess());
-        assertEquals("不能重复下单", result.getErrorMsg());
-        verify(seckillVoucherService, never()).update(any(UpdateWrapper.class));
-        verifyNoInteractions(redisIdWorker);
-        verify(voucherOrderMapper, never()).insert(any(VoucherOrder.class));
-
-        ArgumentCaptor<Wrapper<VoucherOrder>> queryCaptor = ArgumentCaptor.forClass(Wrapper.class);
-        verify(voucherOrderMapper).selectCount(queryCaptor.capture());
-        String querySql = queryCaptor.getValue().getCustomSqlSegment();
-        assertTrue(querySql.contains("user_id"));
-        assertTrue(querySql.contains("voucher_id"));
-    }
-
-    @Test
-    @SuppressWarnings("unchecked")
-    void failedConditionalStockUpdateDoesNotCreateOrder() {
-        when(voucherOrderMapper.selectCount(any(Wrapper.class))).thenReturn(0);
-        when(seckillVoucherService.update(any(UpdateWrapper.class))).thenReturn(false);
-
-        Result result = voucherOrderService.createVoucherOrder(VOUCHER_ID, USER_ID);
-
-        assertFalse(result.getSuccess());
-        assertEquals("库存不足", result.getErrorMsg());
-        verifyNoInteractions(redisIdWorker);
-        verify(voucherOrderMapper, never()).insert(any(VoucherOrder.class));
-    }
-
-    @Test
-    @SuppressWarnings("unchecked")
-    void validFirstPurchaseConditionallyDecrementsStockAndCreatesOrder() {
-        when(voucherOrderMapper.selectCount(any(Wrapper.class))).thenReturn(0);
-        when(seckillVoucherService.update(any(UpdateWrapper.class))).thenReturn(true);
+    private void stubLuaResult(Long result) {
         when(redisIdWorker.nextId("order")).thenReturn(ORDER_ID);
-        when(voucherOrderMapper.insert(any(VoucherOrder.class))).thenReturn(1);
-
-        Result result = voucherOrderService.createVoucherOrder(VOUCHER_ID, USER_ID);
-
-        assertTrue(result.getSuccess());
-        assertEquals(ORDER_ID, result.getData());
-
-        ArgumentCaptor<VoucherOrder> orderCaptor = ArgumentCaptor.forClass(VoucherOrder.class);
-        verify(voucherOrderMapper).insert(orderCaptor.capture());
-        VoucherOrder order = orderCaptor.getValue();
-        assertEquals(ORDER_ID, order.getId());
-        assertEquals(USER_ID, order.getUserId());
-        assertEquals(VOUCHER_ID, order.getVoucherId());
-
-        ArgumentCaptor<UpdateWrapper<SeckillVoucher>> wrapperCaptor = ArgumentCaptor.forClass(UpdateWrapper.class);
-        verify(seckillVoucherService).update(wrapperCaptor.capture());
-        UpdateWrapper<SeckillVoucher> updateWrapper = wrapperCaptor.getValue();
-        assertTrue(updateWrapper.getSqlSet().contains("stock = stock - 1"));
-        assertTrue(updateWrapper.getCustomSqlSegment().contains("voucher_id"));
-        assertTrue(updateWrapper.getCustomSqlSegment().contains("stock"));
-        assertTrue(updateWrapper.getCustomSqlSegment().contains(">"));
+        when(stringRedisTemplate.execute(
+                any(RedisScript.class),
+                anyList(),
+                anyString(),
+                anyString(),
+                anyString()
+        )).thenReturn(result);
     }
 
-    @Test
-    @SuppressWarnings("unchecked")
-    void failedOrderSaveThrowsFromTransactionalPublicMethod() throws NoSuchMethodException {
-        when(voucherOrderMapper.selectCount(any(Wrapper.class))).thenReturn(0);
-        when(seckillVoucherService.update(any(UpdateWrapper.class))).thenReturn(true);
-        when(redisIdWorker.nextId("order")).thenReturn(ORDER_ID);
-        when(voucherOrderMapper.insert(any(VoucherOrder.class))).thenReturn(0);
-
-        IllegalStateException exception = assertThrows(
-                IllegalStateException.class,
-                () -> voucherOrderService.createVoucherOrder(VOUCHER_ID, USER_ID)
-        );
-
-        assertEquals("订单创建失败", exception.getMessage());
-        Method method = VoucherOrderServiceImpl.class.getMethod(
-                "createVoucherOrder",
-                Long.class,
-                Long.class
-        );
-        assertTrue(method.isAnnotationPresent(Transactional.class));
-    }
-
-    private void stubSuccessfulLockAndProxy(Result proxyResult) {
-        when(seckillVoucherService.getById(VOUCHER_ID)).thenReturn(activeVoucher(VOUCHER_ID));
-        when(redissonClient.getLock(LOCK_KEY)).thenReturn(lock);
-        when(lock.tryLock()).thenReturn(true);
-        when(lock.isHeldByCurrentThread()).thenReturn(true);
-        when(voucherOrderServiceProvider.getObject()).thenReturn(voucherOrderServiceProxy);
-        when(voucherOrderServiceProxy.createVoucherOrder(VOUCHER_ID, USER_ID)).thenReturn(proxyResult);
+    private VoucherOrder order() {
+        return new VoucherOrder()
+                .setId(ORDER_ID)
+                .setUserId(USER_ID)
+                .setVoucherId(VOUCHER_ID);
     }
 
     private void saveCurrentUser(Long userId) {
         UserDTO user = new UserDTO();
         user.setId(userId);
         UserHolder.saveUser(user);
-    }
-
-    private SeckillVoucher activeVoucher(Long voucherId) {
-        return new SeckillVoucher()
-                .setVoucherId(voucherId)
-                .setStock(5)
-                .setBeginTime(LocalDateTime.now().minusMinutes(10))
-                .setEndTime(LocalDateTime.now().plusMinutes(10));
     }
 }
