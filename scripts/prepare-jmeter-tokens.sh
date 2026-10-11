@@ -54,7 +54,7 @@ mvn \
 
 echo
 echo "生成文件："
-wc -l "$PROJECT_DIR/load-test/tokens.txt" "$PROJECT_DIR/load-test/token-users.csv"
+wc -l "$PROJECT_DIR/load-test/token.csv" "$PROJECT_DIR/load-test/token-users.csv"
 echo
 echo "核对结果："
 sed -n '1,20p' "$PROJECT_DIR/load-test/token-verification.txt"

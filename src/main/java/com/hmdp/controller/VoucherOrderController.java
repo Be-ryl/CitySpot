@@ -29,4 +29,12 @@ public class VoucherOrderController {
     public Result seckillVoucher(@PathVariable("id") Long voucherId) {
         return voucherOrderService.seckillVoucher(voucherId);
     }
+
+    /**
+     * RabbitMQ 异步下单入口。原 Stream 接口保持不变，便于使用同一 JMX 切换路径对比。
+     */
+    @PostMapping("seckill/mq/{id}")
+    public Result seckillVoucherMq(@PathVariable("id") Long voucherId) {
+        return voucherOrderService.seckillVoucherMq(voucherId);
+    }
 }

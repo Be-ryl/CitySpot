@@ -20,4 +20,19 @@ class SeckillLuaScriptTest {
         assertTrue(script.contains("SISMEMBER"));
         assertTrue(script.contains("XADD"));
     }
+
+    @Test
+    void mqReservationAndIdempotentCompensationScriptsCanBeLoaded() throws Exception {
+        String reservation = StreamUtils.copyToString(
+                new ClassPathResource("seckill_mq.lua").getInputStream(), StandardCharsets.UTF_8
+        );
+        String compensation = StreamUtils.copyToString(
+                new ClassPathResource("seckill_mq_compensate.lua").getInputStream(), StandardCharsets.UTF_8
+        );
+        assertTrue(reservation.contains("SISMEMBER"));
+        assertTrue(reservation.contains("INCRBY"));
+        assertTrue(!reservation.contains("XADD"));
+        assertTrue(compensation.contains("SREM"));
+        assertTrue(compensation.contains("== 1"));
+    }
 }

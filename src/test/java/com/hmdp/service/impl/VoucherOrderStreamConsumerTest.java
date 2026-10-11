@@ -51,6 +51,11 @@ class VoucherOrderStreamConsumerTest {
     void successfulDatabaseProcessingIsAcknowledgedAfterServiceReturns() {
         MapRecord<String, Object, Object> record = orderRecord();
         when(stringRedisTemplate.opsForStream()).thenReturn(streamOperations);
+        when(streamOperations.acknowledge(
+                RedisConstants.STREAM_ORDERS_KEY,
+                RedisConstants.STREAM_ORDERS_GROUP,
+                record.getId()
+        )).thenReturn(1L);
 
         consumer.processRecord(record);
 
@@ -62,6 +67,7 @@ class VoucherOrderStreamConsumerTest {
                 RedisConstants.STREAM_ORDERS_GROUP,
                 record.getId()
         );
+        inOrder.verify(streamOperations).delete(RedisConstants.STREAM_ORDERS_KEY, record.getId());
         assertEquals(30L, orderCaptor.getValue().getId());
         assertEquals(20L, orderCaptor.getValue().getUserId());
         assertEquals(10L, orderCaptor.getValue().getVoucherId());
@@ -78,6 +84,24 @@ class VoucherOrderStreamConsumerTest {
         verify(streamOperations, never()).acknowledge(
                 RedisConstants.STREAM_ORDERS_KEY,
                 RedisConstants.STREAM_ORDERS_GROUP,
+                record.getId()
+        );
+    }
+
+    @Test
+    void failedAcknowledgeDoesNotDeleteMessage() {
+        MapRecord<String, Object, Object> record = orderRecord();
+        when(stringRedisTemplate.opsForStream()).thenReturn(streamOperations);
+        when(streamOperations.acknowledge(
+                RedisConstants.STREAM_ORDERS_KEY,
+                RedisConstants.STREAM_ORDERS_GROUP,
+                record.getId()
+        )).thenReturn(0L);
+
+        assertThrows(IllegalStateException.class, () -> consumer.processRecord(record));
+
+        verify(streamOperations, never()).delete(
+                RedisConstants.STREAM_ORDERS_KEY,
                 record.getId()
         );
     }

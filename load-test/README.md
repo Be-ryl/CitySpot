@@ -1,110 +1,72 @@
-# JMeter 秒杀压测准备
+# 秒杀异步链路可靠性与性能实验
 
-## 1. 生成 1000 个登录态
+项目保留原 `POST /voucher-order/seckill/{id}`（Lua + Redis Stream），并新增 `POST /voucher-order/seckill/mq/{id}`（Lua 预扣 + RabbitMQ Confirm）。两套接口共用 JMX 与指标统计，不得在同一时刻操作同一测试券。
 
-在项目根目录执行：
+## 隔离端口
+
+| 组件 | 端口 | 用途 |
+|---|---:|---|
+| 原 Redis / 原应用 | 6379 / 8081 | 保留，不由故障脚本停止 |
+| Redis 主 / 从 | 6380 / 6381 | Stream 故障实验，AOF everysec、异步复制 |
+| RabbitMQ / 管理页 / 分布式端口 | 5673 / 15673 / 25673 | 项目隔离单节点 |
+| Stream / Rabbit 故障应用 | 8082 / 8083 | 仅测试脚本可执行 `kill -9` |
+
+RabbitMQ 数据位于 `fault-test/runtime/rabbitmq/mnesia`，脚本重启始终复用该目录。它是单节点持久化实验，不代表多节点高可用。
+
+## 固定压测模型
+
+| 场景 | 线程 | 总样本 | Ramp-up | 线程组循环 | 内部请求循环 | 轮数 |
+|---|---:|---:|---:|---:|---:|---:|
+| A | 1000 | 1000 | 1 秒 | 1 | 1 | 10 |
+| B | 100 | 1000 | 1 秒 | 1 | 10 | 10 |
+
+每轮严格执行健康及中间件检查、数据重置、1000 Token 校验、冒烟、再次恢复基线、JMeter、等待队列排空、DB/Redis/重复用户/DLQ 业务校验。失败时立即停止并保留现场。
+
+## 准备和运行
+
+`.env.local` 至少提供 `MYSQL_PASSWORD`。JMeter 会自动发现项目同级目录下的 `apache-jmeter-5.6.3/bin/jmeter`，也可通过 `JMETER_BIN` 指定。
 
 ```bash
 ./scripts/prepare-jmeter-tokens.sh 1000
+./scripts/rabbitmq-isolated.sh start
+mvn clean package
 ```
 
-生成器会：
-
-1. 从 MySQL 的 `tb_user` 按真实 ID 读取前 1000 个用户。
-2. 为每个用户生成一个随机 UUID Token。
-3. 把脱敏后的 `id`、`nickName`、`icon` 写入 Redis Hash：`login:token:{token}`。
-4. 为每个 Redis 登录态设置 30 分钟 TTL。
-5. 将同一批 Token 逐行写入 `load-test/tokens.txt`。
-6. 将o `user_id,tken` 对应关系写入 `load-test/token-users.csv`，供人工核对。
-7. 重新读取文件和全部 Redis Hash，核对 Token、用户 ID、字段和 TTL。
-8. 将核对结论写入 `load-test/token-verification.txt`。
-
-`tokens.txt`、映射文件和核对报告都已加入 `.gitignore`，不会被提交。
-
-登录态有效期为 30 分钟。应在开始 JMeter 压测前重新运行生成脚本。
-
-脚本重跑时会覆盖本地的三个生成文件，但不会主动删除上一轮 Redis Token，避免误删正在使用的登录态；上一轮 Token 会在 30 分钟后由 Redis 自动过期。
-
-## 2. JMeter 公共配置
-
-CSV Data Set Config：
-
-```text
-Filename: 项目绝对路径/load-test/tokens.txt
-Variable Names: token
-Recycle on EOF: False
-Stop thread on EOF: True
-Sharing mode: All threads
-```
-
-HTTP Header Manager：
-
-```text
-authorization: ${token}
-```
-
-HTTP Request：
-
-```text
-Method: POST
-Path: /voucher-order/seckill/{测试优惠券ID}
-```
-
-正式压测不要在 JMeter GUI 中运行。GUI 用于编辑 `.jmx`，运行时使用非 GUI 命令并生成 HTML 报告：
+启动 Stream 应用 8081 后运行：
 
 ```bash
-jmeter -n -t seckill.jmx -l result.jtl -e -o report
+BACKEND=stream ./scripts/run-seckill-benchmark.sh
 ```
 
-## 3. 100 线程与 1000 线程的可比方案
+启动 RabbitMQ 应用 8083（Rabbit 开启、Stream 消费者关闭）后运行：
 
-两组测试都发送 1000 个请求、使用 1000 个不同用户，只有并发度不同：
-
-| 场景 | 线程数 | 循环次数 | Token 数 | 总请求数 | Ramp-up |
-|---|---:|---:|---:|---:|---:|
-| A | 100 | 10 | 1000 | 1000 | 1 秒 |
-| B | 1000 | 1 | 1000 | 1000 | 1 秒 |
-
-CSV Sharing mode 必须为 `All threads`，这样场景 A 的每次循环也会继续读取下一行 Token，而不是重复同一个用户。
-
-为了避免前一轮订单影响后一轮，应为两个场景准备库存、时间窗口完全相同的两个测试优惠券；或者仅在隔离的测试数据库中，在两轮之间恢复库存并清理对应测试订单。
-
-建议先进行一次 20 线程预热，预热结果不计入对比。
-
-重点比较 JMeter Aggregate Report 或 HTML 报告中的：
-
-- Throughput：每秒处理请求数，越高越好。
-- Average：平均响应时间。
-- Median：50% 请求的响应时间。
-- 90th / 95th / 99th percentile：尾部慢请求，尤其关注 95% 和 99%。
-- Error %：失败比例；还要区分业务失败与 HTTP/系统错误。
-- 实际成功订单数和库存变化，防止只看速度而忽略正确性。
-
-如果 1000 线程相较 100 线程吞吐量没有明显增加，但 P95、P99 和错误率显著上升，说明系统已经接近或超过当前容量。不要只用平均响应时间判断。
-
-## 4. 一人一单专项测试
-
-另建一个线程组，让 100 个线程都使用同一个有效 Token，并对一个没有购买记录的新优惠券各请求一次。
-
-预期：
-
-- 最终只有一笔订单。
-- 库存只减少 1。
-- 其余请求返回“请求正在处理中”或“不能重复下单”。
-
-数据库核对：
-
-```sql
-SELECT COUNT(*) AS order_count,
-       COUNT(DISTINCT user_id) AS user_count
-FROM tb_voucher_order
-WHERE voucher_id = ?;
-
-SELECT user_id, voucher_id, COUNT(*) AS order_count
-FROM tb_voucher_order
-WHERE voucher_id = ?
-GROUP BY user_id, voucher_id
-HAVING COUNT(*) > 1;
+```bash
+./scripts/rabbitmq-app-isolated.sh start
+BACKEND=rabbit ./scripts/run-seckill-benchmark.sh
+./scripts/rabbitmq-app-isolated.sh stop
 ```
 
-第二条 SQL 应返回 0 行。
+应用控制脚本适合普通终端使用；在会自动清理子进程的 CI/代理环境中，应把应用作为独立前台任务保持运行。
+
+每次结果目录包含 20 个 JTL、20 个 HTML 报告、逐轮 `summary.json`、队列积压 CSV、`round-metrics.csv` 和最终 `benchmark-report.md`。
+
+## 故障实验
+
+```bash
+# Redis：A1 30轮、A2 10轮、消费者崩溃/毒消息 10轮
+./scripts/run-redis-stream-fault-tests.sh all
+
+# RabbitMQ：broker 重启30轮、未ACK重投10轮、毒消息DLQ 5轮
+./scripts/run-rabbitmq-fault-tests.sh all
+```
+
+两个脚本仅会对 PID、监听端口与命令行均匹配的 6380/6381、8082/8083 或隔离 RabbitMQ 进程执行 `kill -9`。不会停止 Redis 6379 或应用 8081。
+
+Redis A1 默认健康网络与 A2 复制暂停对照必须分别统计。`kill -9` 不是断电；AOF everysec 尚未 fsync 的断电风险需作为原理边界说明。RabbitMQ 故障实验必须在获得 Confirm ACK 后再杀 broker；毒消息要求恰好 3 次尝试后进入 DLQ。
+
+## 可靠性边界
+
+- 明确 NACK 或无法路由时，补偿 Lua 通过 `SREM` 返回值保证幂等撤销预扣。
+- Confirm 超时/连接异常属于结果未知，不补偿，避免消息实际已持久化后错误回补造成超卖。
+- Redis Lua 与 RabbitMQ 发布之间仍有应用崩溃窗口；本版本没有事务 Outbox，这是性能对比的明确限制。
+- 消费者并发和 prefetch 都是 1；事务返回后才手动 ACK，失败最多尝试 3 次、固定间隔 500ms，最终拒绝且不 requeue，由 broker 路由到 DLQ。

@@ -19,6 +19,21 @@ spring:
         max-idle: 10
         min-idle: 1
         time-between-eviction-runs: 10s
+  rabbitmq:
+    host: ${RABBITMQ_HOST:127.0.0.1}
+    port: ${RABBITMQ_PORT:5673}
+    username: ${RABBITMQ_USERNAME:guest}
+    password: ${RABBITMQ_PASSWORD:guest}
+    publisher-confirm-type: correlated
+    publisher-returns: true
+    template:
+      mandatory: true
+    listener:
+      simple:
+        acknowledge-mode: manual
+        prefetch: 1
+        concurrency: 1
+        max-concurrency: 1
   jackson:
     default-property-inclusion: non_null # JSON处理时忽略非空字段
 mybatis-plus:
@@ -26,3 +41,23 @@ mybatis-plus:
 logging:
   level:
     com.hmdp: debug
+management:
+  health:
+    rabbit:
+      enabled: ${RABBITMQ_HEALTH_ENABLED:false}
+  endpoints:
+    web:
+      exposure:
+        include: health
+hmdp:
+  voucher-order:
+    stream-consumer:
+      enabled: ${STREAM_CONSUMER_ENABLED:true}
+    rabbit:
+      enabled: ${RABBITMQ_ENABLED:false}
+      consumer-enabled: ${RABBITMQ_CONSUMER_ENABLED:false}
+      confirm-timeout: 5s
+    consumer:
+      processing-delay-ms: ${VOUCHER_ORDER_PROCESSING_DELAY_MS:0}
+  fault-injection:
+    enabled: ${FAULT_INJECTION_ENABLED:false}

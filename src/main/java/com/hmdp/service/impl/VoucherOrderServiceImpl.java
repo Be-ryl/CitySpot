@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.hmdp.dto.Result;
 import com.hmdp.dto.UserDTO;
+import com.hmdp.dto.VoucherOrderMessage;
 import com.hmdp.entity.SeckillVoucher;
 import com.hmdp.entity.VoucherOrder;
 import com.hmdp.mapper.VoucherOrderMapper;
@@ -39,11 +40,19 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         implements IVoucherOrderService {
 
     private static final DefaultRedisScript<Long> SECKILL_SCRIPT;
+    private static final DefaultRedisScript<Long> MQ_SECKILL_SCRIPT;
+    private static final DefaultRedisScript<Long> MQ_COMPENSATE_SCRIPT;
 
     static {
         SECKILL_SCRIPT = new DefaultRedisScript<>();
         SECKILL_SCRIPT.setLocation(new ClassPathResource("seckill.lua"));
         SECKILL_SCRIPT.setResultType(Long.class);
+        MQ_SECKILL_SCRIPT = new DefaultRedisScript<>();
+        MQ_SECKILL_SCRIPT.setLocation(new ClassPathResource("seckill_mq.lua"));
+        MQ_SECKILL_SCRIPT.setResultType(Long.class);
+        MQ_COMPENSATE_SCRIPT = new DefaultRedisScript<>();
+        MQ_COMPENSATE_SCRIPT.setLocation(new ClassPathResource("seckill_mq_compensate.lua"));
+        MQ_COMPENSATE_SCRIPT.setResultType(Long.class);
     }
 
     @Resource
@@ -60,6 +69,9 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
 
     @Resource
     private ObjectProvider<IVoucherOrderService> voucherOrderServiceProvider;
+
+    @Resource
+    private ObjectProvider<VoucherOrderRabbitPublisher> rabbitPublisherProvider;
 
     @Override
     public Result seckillVoucher(Long voucherId) {
@@ -107,6 +119,89 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
 
         // 3. Lua成功后立即返回，订单由后台消费者异步落库
         return Result.ok(orderId);
+    }
+
+    @Override
+    public Result seckillVoucherMq(Long voucherId) {
+        if (voucherId == null || voucherId <= 0) {
+            return Result.fail("优惠券ID无效");
+        }
+        UserDTO user = UserHolder.getUser();
+        if (user == null || user.getId() == null) {
+            return Result.fail("请先登录");
+        }
+
+        VoucherOrderRabbitPublisher publisher = rabbitPublisherProvider == null
+                ? null : rabbitPublisherProvider.getIfAvailable();
+        if (publisher == null) {
+            return Result.fail("RabbitMQ下单未启用");
+        }
+
+        Long userId = user.getId();
+        long orderId = redisIdWorker.nextId("order");
+        Long reservation = stringRedisTemplate.execute(
+                MQ_SECKILL_SCRIPT,
+                Arrays.asList(
+                        RedisConstants.SECKILL_STOCK_KEY + voucherId,
+                        RedisConstants.SECKILL_ORDER_KEY + voucherId
+                ),
+                userId.toString()
+        );
+        Result reservationFailure = mapReservationFailure(reservation, orderId, userId, voucherId);
+        if (reservationFailure != null) {
+            return reservationFailure;
+        }
+
+        VoucherOrderMessage message = new VoucherOrderMessage(orderId, userId, voucherId);
+        RabbitPublishResult publishResult = publisher.publish(message);
+        if (publishResult.getStatus() == RabbitPublishResult.Status.CONFIRMED) {
+            return Result.ok(orderId);
+        }
+        if (publishResult.getStatus() == RabbitPublishResult.Status.DEFINITELY_FAILED) {
+            compensateReservation(voucherId, userId, orderId, publishResult.getDetail());
+            return Result.fail("消息投递失败，库存预扣已撤销");
+        }
+
+        // Confirm 超时/连接异常时 broker 可能已经持久化消息，回补会制造超卖窗口。
+        log.error(
+                "rabbit_order_status_unknown orderId={} userId={} voucherId={} detail={}",
+                orderId, userId, voucherId, publishResult.getDetail()
+        );
+        return Result.fail("消息确认超时，订单状态未知，请勿重复提交");
+    }
+
+    private Result mapReservationFailure(Long result, long orderId, long userId, long voucherId) {
+        if (result == null) {
+            log.error("MQ秒杀Lua返回空值，orderId={}, userId={}, voucherId={}", orderId, userId, voucherId);
+            return Result.fail("系统繁忙，请稍后重试");
+        }
+        if (result == 1L) {
+            return Result.fail("库存不足");
+        }
+        if (result == 2L) {
+            return Result.fail("不能重复下单");
+        }
+        if (result != 0L) {
+            log.error("MQ秒杀Lua返回未知状态，status={}, orderId={}, userId={}, voucherId={}",
+                    result, orderId, userId, voucherId);
+            return Result.fail("系统繁忙，请稍后重试");
+        }
+        return null;
+    }
+
+    private void compensateReservation(long voucherId, long userId, long orderId, String reason) {
+        Long compensated = stringRedisTemplate.execute(
+                MQ_COMPENSATE_SCRIPT,
+                Arrays.asList(
+                        RedisConstants.SECKILL_STOCK_KEY + voucherId,
+                        RedisConstants.SECKILL_ORDER_KEY + voucherId
+                ),
+                Long.toString(userId)
+        );
+        log.warn(
+                "rabbit_publish_compensated orderId={} userId={} voucherId={} result={} reason={}",
+                orderId, userId, voucherId, compensated, reason
+        );
     }
 
     @Override

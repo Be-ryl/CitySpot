@@ -1,0 +1,134 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<jmeterTestPlan version="1.2" properties="5.0" jmeter="5.6.3">
+  <hashTree>
+    <TestPlan guiclass="TestPlanGui" testclass="TestPlan" testname="Lua + Redis Stream 秒杀压测" enabled="true">
+      <stringProp name="TestPlan.comments">线程组固定循环 1 次；请求控制器按 samples/threads 补足总样本数。</stringProp>
+      <boolProp name="TestPlan.functional_mode">false</boolProp>
+      <boolProp name="TestPlan.serialize_threadgroups">false</boolProp>
+      <elementProp name="TestPlan.user_defined_variables" elementType="Arguments" guiclass="ArgumentsPanel" testclass="Arguments" testname="用户变量" enabled="true">
+        <collectionProp name="Arguments.arguments"/>
+      </elementProp>
+      <stringProp name="TestPlan.user_define_classpath"/>
+    </TestPlan>
+    <hashTree>
+      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="秒杀线程组" enabled="true">
+        <stringProp name="ThreadGroup.on_sample_error">continue</stringProp>
+        <elementProp name="ThreadGroup.main_controller" elementType="LoopController" guiclass="LoopControlPanel" testclass="LoopController" testname="线程组循环控制器" enabled="true">
+          <boolProp name="LoopController.continue_forever">false</boolProp>
+          <stringProp name="LoopController.loops">1</stringProp>
+        </elementProp>
+        <stringProp name="ThreadGroup.num_threads">${__P(threads,1000)}</stringProp>
+        <stringProp name="ThreadGroup.ramp_time">${__P(rampup,1)}</stringProp>
+        <boolProp name="ThreadGroup.scheduler">false</boolProp>
+        <stringProp name="ThreadGroup.duration"/>
+        <stringProp name="ThreadGroup.delay"/>
+        <boolProp name="ThreadGroup.same_user_on_next_iteration">false</boolProp>
+      </ThreadGroup>
+      <hashTree>
+        <LoopController guiclass="LoopControlPanel" testclass="LoopController" testname="每线程请求数" enabled="true">
+          <boolProp name="LoopController.continue_forever">false</boolProp>
+          <stringProp name="LoopController.loops">${__P(requestsPerThread,1)}</stringProp>
+        </LoopController>
+        <hashTree>
+          <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="POST 秒杀入队" enabled="true">
+            <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments" testname="请求参数" enabled="true">
+              <collectionProp name="Arguments.arguments"/>
+            </elementProp>
+            <stringProp name="HTTPSampler.domain">${__P(host,127.0.0.1)}</stringProp>
+            <stringProp name="HTTPSampler.port">${__P(port,8081)}</stringProp>
+            <stringProp name="HTTPSampler.protocol">${__P(protocol,http)}</stringProp>
+            <stringProp name="HTTPSampler.contentEncoding">UTF-8</stringProp>
+            <stringProp name="HTTPSampler.path">${__P(apiPath,/voucher-order/seckill)}/${__P(voucherId,10)}</stringProp>
+            <stringProp name="HTTPSampler.method">POST</stringProp>
+            <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+            <boolProp name="HTTPSampler.auto_redirects">false</boolProp>
+            <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+            <boolProp name="HTTPSampler.DO_MULTIPART_POST">false</boolProp>
+            <stringProp name="HTTPSampler.embedded_url_re"/>
+            <stringProp name="HTTPSampler.connect_timeout">5000</stringProp>
+            <stringProp name="HTTPSampler.response_timeout">10000</stringProp>
+          </HTTPSamplerProxy>
+          <hashTree>
+            <JSR223PreProcessor guiclass="TestBeanGUI" testclass="JSR223PreProcessor" testname="分配唯一 Token" enabled="true">
+              <stringProp name="cacheKey">true</stringProp>
+              <stringProp name="filename"/>
+              <stringProp name="parameters"/>
+              <stringProp name="script"><![CDATA[
+import java.nio.file.Files
+import java.nio.file.Paths
+import java.util.concurrent.atomic.AtomicInteger
+
+def tokens = props.get('hmdp.loadtest.tokens')
+if (tokens == null) {
+    synchronized (props) {
+        tokens = props.get('hmdp.loadtest.tokens')
+        if (tokens == null) {
+            def tokenPath = Paths.get(props.getProperty('tokenFile')).toAbsolutePath().normalize()
+            def lines = Files.readAllLines(tokenPath)
+            if (lines.isEmpty() || lines.get(0).trim() != 'token') {
+                throw new IllegalStateException('token.csv 缺少 token 表头：' + tokenPath)
+            }
+            tokens = lines.subList(1, lines.size()).findAll { !it.trim().isEmpty() }.collect { it.trim() }
+            // 先发布计数器、最后发布 token 列表。列表是初始化完成标记，避免并发线程
+            // 已看到列表却尚未看到计数器，从而拿到空 Token。
+            props.put('hmdp.loadtest.tokenCounter', new AtomicInteger(0))
+            props.put('hmdp.loadtest.tokens', tokens)
+        }
+    }
+}
+
+def tokenIndex = (props.get('hmdp.loadtest.tokenCounter') as AtomicInteger).getAndIncrement()
+if (tokenIndex >= tokens.size()) {
+    throw new IllegalStateException('token.csv 可用 Token 不足，索引=' + tokenIndex + '，总数=' + tokens.size())
+}
+vars.put('token', tokens.get(tokenIndex) as String)
+vars.put('token_index', Integer.toString(tokenIndex))
+              ]]></stringProp>
+              <stringProp name="scriptLanguage">groovy</stringProp>
+            </JSR223PreProcessor>
+            <hashTree/>
+            <HeaderManager guiclass="HeaderPanel" testclass="HeaderManager" testname="认证请求头" enabled="true">
+              <collectionProp name="HeaderManager.headers">
+                <elementProp name="" elementType="Header">
+                  <stringProp name="Header.name">authorization</stringProp>
+                  <stringProp name="Header.value">${token}</stringProp>
+                </elementProp>
+              </collectionProp>
+            </HeaderManager>
+            <hashTree/>
+            <ResponseAssertion guiclass="AssertionGui" testclass="ResponseAssertion" testname="HTTP 200 校验" enabled="true">
+              <collectionProp name="Asserion.test_strings">
+                <stringProp name="49586">200</stringProp>
+              </collectionProp>
+              <stringProp name="Assertion.custom_message">秒杀接口 HTTP 状态不是 200</stringProp>
+              <stringProp name="Assertion.test_field">Assertion.response_code</stringProp>
+              <boolProp name="Assertion.assume_success">false</boolProp>
+              <intProp name="Assertion.test_type">8</intProp>
+            </ResponseAssertion>
+            <hashTree/>
+            <JSR223PostProcessor guiclass="TestBeanGUI" testclass="JSR223PostProcessor" testname="提取业务入队结果" enabled="true">
+              <stringProp name="cacheKey">true</stringProp>
+              <stringProp name="filename"/>
+              <stringProp name="parameters"/>
+              <stringProp name="script"><![CDATA[
+try {
+    def body = new groovy.json.JsonSlurper().parseText(prev.getResponseDataAsString())
+    if (!(body.success instanceof Boolean)) {
+        throw new IllegalStateException('响应缺少布尔型 success 字段')
+    }
+    vars.put('business_success', Boolean.toString(body.success))
+} catch (Exception exception) {
+    vars.put('business_success', 'false')
+    prev.setSuccessful(false)
+    prev.setResponseMessage('无法解析业务响应：' + exception.message)
+}
+              ]]></stringProp>
+              <stringProp name="scriptLanguage">groovy</stringProp>
+            </JSR223PostProcessor>
+            <hashTree/>
+          </hashTree>
+        </hashTree>
+      </hashTree>
+    </hashTree>
+  </hashTree>
+</jmeterTestPlan>

@@ -25,4 +25,18 @@ class VoucherOrderControllerTest {
         assertSame(expected, actual);
         verify(voucherOrderService).seckillVoucher(10L);
     }
+
+    @Test
+    void rabbitSeckillEndpointDelegatesBusinessLogicToService() {
+        IVoucherOrderService voucherOrderService = mock(IVoucherOrderService.class);
+        VoucherOrderController controller = new VoucherOrderController();
+        ReflectionTestUtils.setField(controller, "voucherOrderService", voucherOrderService);
+        Result expected = Result.ok(456L);
+        when(voucherOrderService.seckillVoucherMq(10L)).thenReturn(expected);
+
+        Result actual = controller.seckillVoucherMq(10L);
+
+        assertSame(expected, actual);
+        verify(voucherOrderService).seckillVoucherMq(10L);
+    }
 }

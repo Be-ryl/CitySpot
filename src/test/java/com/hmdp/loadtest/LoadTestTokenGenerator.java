@@ -77,7 +77,7 @@ class LoadTestTokenGenerator {
                 "MySQL 中可用用户不足 " + requestedUserCount + " 个"
         );
 
-        Path tokenTempFile = Files.createTempFile(outputDirectory, "tokens-", ".tmp");
+        Path tokenTempFile = Files.createTempFile(outputDirectory, "token-", ".tmp");
         Path auditTempFile = Files.createTempFile(outputDirectory, "token-users-", ".tmp");
         Path reportTempFile = Files.createTempFile(outputDirectory, "token-verification-", ".tmp");
 
@@ -117,7 +117,10 @@ class LoadTestTokenGenerator {
                 auditLines.add(user.getId() + "," + token);
             }
 
-            Files.write(tokenTempFile, tokens, StandardCharsets.UTF_8);
+            List<String> tokenCsvLines = new ArrayList<>(requestedUserCount + 1);
+            tokenCsvLines.add("token");
+            tokenCsvLines.addAll(tokens);
+            Files.write(tokenTempFile, tokenCsvLines, StandardCharsets.UTF_8);
             Files.write(auditTempFile, auditLines, StandardCharsets.UTF_8);
 
             VerificationSummary summary = verifyGeneratedData(
@@ -132,13 +135,13 @@ class LoadTestTokenGenerator {
                     StandardCharsets.UTF_8
             );
 
-            moveReplacing(tokenTempFile, outputDirectory.resolve("tokens.txt"));
+            moveReplacing(tokenTempFile, outputDirectory.resolve("token.csv"));
             moveReplacing(auditTempFile, outputDirectory.resolve("token-users.csv"));
             moveReplacing(reportTempFile, outputDirectory.resolve("token-verification.txt"));
 
             System.out.println("JMeter 压测登录态准备完成");
             System.out.println("用户数：" + requestedUserCount);
-            System.out.println("tokens.txt：" + outputDirectory.resolve("tokens.txt"));
+            System.out.println("token.csv：" + outputDirectory.resolve("token.csv"));
             System.out.println("用户映射：" + outputDirectory.resolve("token-users.csv"));
             System.out.println("核对报告：" + outputDirectory.resolve("token-verification.txt"));
             System.out.println("Redis TTL 范围：" + summary.minimumTtlSeconds + "～"
@@ -170,9 +173,12 @@ class LoadTestTokenGenerator {
             List<String> expectedTokens,
             Map<String, Long> expectedUserIds
     ) throws IOException {
-        List<String> fileTokens = Files.readAllLines(tokenFile, StandardCharsets.UTF_8);
-        assertEquals(expectedTokens, fileTokens, "tokens.txt 内容与本次生成的 Token 不一致");
-        assertEquals(expectedTokens.size(), new HashSet<>(fileTokens).size(), "tokens.txt 中存在重复 Token");
+        List<String> tokenCsvLines = Files.readAllLines(tokenFile, StandardCharsets.UTF_8);
+        assertEquals(expectedTokens.size() + 1, tokenCsvLines.size(), "token.csv 行数不正确");
+        assertEquals("token", tokenCsvLines.get(0), "token.csv 表头不正确");
+        List<String> fileTokens = tokenCsvLines.subList(1, tokenCsvLines.size());
+        assertEquals(expectedTokens, fileTokens, "token.csv 内容与本次生成的 Token 不一致");
+        assertEquals(expectedTokens.size(), new HashSet<>(fileTokens).size(), "token.csv 中存在重复 Token");
 
         List<String> auditLines = Files.readAllLines(auditFile, StandardCharsets.UTF_8);
         assertEquals(expectedTokens.size() + 1, auditLines.size(), "token-users.csv 行数不正确");
@@ -235,7 +241,7 @@ class LoadTestTokenGenerator {
         report.add("minimumTtlSeconds=" + summary.minimumTtlSeconds);
         report.add("maximumTtlSeconds=" + summary.maximumTtlSeconds);
         report.add("sampleTokenPrefix=" + summary.sampleTokenPrefix + "...");
-        report.add("tokensFile=" + outputDirectory.resolve("tokens.txt"));
+        report.add("tokensFile=" + outputDirectory.resolve("token.csv"));
         report.add("auditFile=" + outputDirectory.resolve("token-users.csv"));
         report.add("redisAndFileMapping=ONE_TO_ONE");
         report.add("sensitiveFieldsStored=false");

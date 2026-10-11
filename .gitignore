@@ -25,6 +25,7 @@
 # virtual machine crash logs, see http://www.java.com/en/download/help/error_hotspot.xml
 hs_err_pid*
 replay_pid*
+__pycache__/
 **/.DS_Store
 
 # Local development environment variables
@@ -35,6 +36,10 @@ replay_pid*
 
 # Generated JMeter login data (contains temporary login credentials)
 /load-test/tokens.txt
+/load-test/token.csv
 /load-test/token-users.csv
 /load-test/token-verification.txt
 /load-test/*.tmp
+/load-test/results/
+/fault-test/runtime/
+/fault-test/results/

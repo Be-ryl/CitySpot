@@ -28,7 +28,10 @@ public class MvcConfig implements WebMvcConfigurer {
                         "/upload/**",
                         "/blog/hot",
                         "/user/code",
-                        "/user/login"
+                        "/user/login",
+                        "/actuator/health",
+                        "/actuator/health/**",
+                        "/internal/fault/**"
                 )
                 .order(1);
     }

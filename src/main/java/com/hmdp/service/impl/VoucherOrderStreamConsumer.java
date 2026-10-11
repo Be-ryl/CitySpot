@@ -19,6 +19,7 @@ import org.springframework.stereotype.Component;
 
 import javax.annotation.PostConstruct;
 import javax.annotation.PreDestroy;
+import javax.annotation.Resource;
 import java.time.Duration;
 import java.util.Collections;
 import java.util.List;
@@ -42,6 +43,8 @@ public class VoucherOrderStreamConsumer {
 
     private final StringRedisTemplate stringRedisTemplate;
     private final ObjectProvider<IVoucherOrderService> voucherOrderServiceProvider;
+    @Resource
+    private VoucherOrderConsumerDelay consumerDelay;
     private final ExecutorService consumerExecutor = Executors.newSingleThreadExecutor(runnable -> {
         Thread thread = new Thread(runnable, "voucher-order-stream-consumer");
         thread.setDaemon(true);
@@ -122,6 +125,13 @@ public class VoucherOrderStreamConsumer {
                 if (!running || Thread.currentThread().isInterrupted()) {
                     break;
                 }
+                if (isNoGroup(exception)) {
+                    log.warn("订单Stream或消费组被重置，正在自动恢复，stream={}, group={}",
+                            RedisConstants.STREAM_ORDERS_KEY, RedisConstants.STREAM_ORDERS_GROUP);
+                    initializeStreamGroup();
+                    sleepAfterFailure();
+                    continue;
+                }
                 log.error("读取或处理订单Stream消息失败，将保留Pending消息后重试", exception);
                 sleepAfterFailure();
             }
@@ -171,13 +181,22 @@ public class VoucherOrderStreamConsumer {
                     .setId(orderId)
                     .setUserId(userId)
                     .setVoucherId(voucherId);
+            if (consumerDelay != null) {
+                consumerDelay.beforeProcessing();
+            }
             voucherOrderServiceProvider.getObject().handleVoucherOrder(voucherOrder);
             // 5. 事务正常完成或确认是幂等终态后才能ACK，异常时消息必须留在Pending List
-            streamOperations().acknowledge(
+            Long acknowledged = streamOperations().acknowledge(
                     RedisConstants.STREAM_ORDERS_KEY,
                     RedisConstants.STREAM_ORDERS_GROUP,
                     record.getId()
             );
+            if (acknowledged == null || acknowledged != 1L) {
+                throw new IllegalStateException("订单Stream消息确认失败：" + record.getId());
+            }
+            // ACK 后删除已完成消息，让 XLEN 能直接反映尚未完成的异步任务数。
+            // 如果删除失败，订单已经落库且消息已 ACK，只会留下可安全清理的历史记录。
+            streamOperations().delete(RedisConstants.STREAM_ORDERS_KEY, record.getId());
         } catch (Exception exception) {
             log.error("异步订单处理失败，不确认消息，recordId={}, orderId={}, userId={}, voucherId={}",
                     record.getId(), orderId, userId, voucherId, exception);
@@ -207,6 +226,17 @@ public class VoucherOrderStreamConsumer {
         Throwable current = throwable;
         while (current != null) {
             if (current.getMessage() != null && current.getMessage().contains("BUSYGROUP")) {
+                return true;
+            }
+            current = current.getCause();
+        }
+        return false;
+    }
+
+    private boolean isNoGroup(Throwable throwable) {
+        Throwable current = throwable;
+        while (current != null) {
+            if (current.getMessage() != null && current.getMessage().contains("NOGROUP")) {
                 return true;
             }
             current = current.getCause();
