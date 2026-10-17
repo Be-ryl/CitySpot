@@ -1,0 +1,36 @@
+{
+  "notice": "知识库文档为黑马点评杭州站内部演示规则。仅参考公开规则的业务结构和术语，正文均为重新编写，不代表来源平台的现行承诺。",
+  "retrieved_at": "2026-10-15",
+  "sources": [
+    {
+      "title": "美团团购用户服务条款",
+      "url": "https://rules-center.meituan.com/m/detail/guize/1",
+      "used_for": ["团购订单", "退款条件", "优惠工具", "交易快照"]
+    },
+    {
+      "title": "美团团购服务保障",
+      "url": "https://rules-center.meituan.com/m/detail/guize/386003?activeRule=1",
+      "used_for": ["未消费退款", "过期自动退", "原路退回"]
+    },
+    {
+      "title": "到店餐饮商户履约保障管理办法",
+      "url": "https://rules-center.meituan.com/m/detail/guize/1174?activeRule=1",
+      "used_for": ["拒绝接待", "核销故障", "商户无法履约"]
+    },
+    {
+      "title": "到店餐饮商户预订业务管理办法",
+      "url": "https://rules-center.meituan.com/rules-detail/295",
+      "used_for": ["预约", "商户未履约"]
+    },
+    {
+      "title": "美团外卖商家代金券使用规则",
+      "url": "https://rules-center.meituan.com/v1/mss_7482cc6672ce4e76a32d7d7c3161ac24/rules-center/%E7%BE%8E%E5%9B%A2%E5%A4%96%E5%8D%96%E4%BB%A3%E9%87%91%E5%88%B8%E4%BD%BF%E7%94%A8%E8%A7%84%E5%88%99.pdf?openInApp=2",
+      "used_for": ["优惠券定义", "使用条件", "不可转售"]
+    },
+    {
+      "title": "美团到店餐饮商户食品安全问题处理规则",
+      "url": "https://rules-center.meituan.com/m/detail/guize/1504?activeRule=1",
+      "used_for": ["食品安全售后", "举证", "处理时效"]
+    }
+  ]
+}

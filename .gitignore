@@ -26,6 +26,12 @@
 hs_err_pid*
 replay_pid*
 __pycache__/
+*.py[cod]
+ai-service/.env
+ai-service/.venv/
+ai-service/models/
+ai-service/artifacts/indexes/
+.pytest_cache/
 **/.DS_Store
 
 # Local development environment variables

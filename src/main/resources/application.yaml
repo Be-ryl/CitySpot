@@ -50,6 +50,8 @@ management:
       exposure:
         include: health
 hmdp:
+  shop-geo:
+    initialize-on-startup: ${SHOP_GEO_INITIALIZE_ON_STARTUP:true}
   voucher-order:
     stream-consumer:
       enabled: ${STREAM_CONSUMER_ENABLED:true}

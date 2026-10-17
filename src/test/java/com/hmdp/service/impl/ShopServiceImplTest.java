@@ -12,10 +12,19 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.data.geo.Circle;
+import org.springframework.data.geo.Distance;
+import org.springframework.data.geo.GeoResult;
+import org.springframework.data.geo.GeoResults;
+import org.springframework.data.geo.Point;
+import org.springframework.data.redis.connection.RedisGeoCommands;
+import org.springframework.data.redis.core.GeoOperations;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ValueOperations;
 import org.springframework.test.util.ReflectionTestUtils;
 
+import java.util.Arrays;
+import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -47,6 +56,8 @@ class ShopServiceImplTest {
     @Mock
     private ValueOperations<String, String> valueOperations;
     @Mock
+    private GeoOperations<String, String> geoOperations;
+    @Mock
     private ShopMapper shopMapper;
 
     private ShopServiceImpl shopService;
@@ -57,6 +68,7 @@ class ShopServiceImplTest {
         ReflectionTestUtils.setField(shopService, "stringRedisTemplate", stringRedisTemplate);
         ReflectionTestUtils.setField(shopService, "baseMapper", shopMapper);
         lenient().when(stringRedisTemplate.opsForValue()).thenReturn(valueOperations);
+        lenient().when(stringRedisTemplate.opsForGeo()).thenReturn(geoOperations);
         clearInvocations(stringRedisTemplate);
     }
 
@@ -290,6 +302,53 @@ class ShopServiceImplTest {
         assertFalse(result.getSuccess());
         assertEquals("店铺ID不能为空", result.getErrorMsg());
         verifyNoInteractions(shopMapper, stringRedisTemplate);
+    }
+
+    @Test
+    void nearbyQueryReturnsShopsInDistanceOrderWithDistance() {
+        Long nearestId = 2L;
+        Long fartherId = 1L;
+        List<GeoResult<RedisGeoCommands.GeoLocation<String>>> geoResultList = Arrays.asList(
+                geoResult(nearestId, 120D),
+                geoResult(fartherId, 860D)
+        );
+        when(geoOperations.radius(
+                eq(RedisConstants.SHOP_GEO_KEY + 2),
+                any(Circle.class),
+                any(RedisGeoCommands.GeoRadiusCommandArgs.class)
+        )).thenReturn(new GeoResults<>(geoResultList));
+
+        Shop nearest = shop().setId(nearestId).setName("最近的店");
+        Shop farther = shop().setId(fartherId).setName("较远的店");
+        // 数据库返回顺序不可靠，业务层应按 Redis 的距离顺序重新组装。
+        when(shopMapper.selectBatchIds(Arrays.asList(nearestId, fartherId)))
+                .thenReturn(Arrays.asList(farther, nearest));
+
+        Result result = shopService.queryShopByType(2, 1, 121.5D, 31.2D);
+
+        assertTrue(result.getSuccess());
+        @SuppressWarnings("unchecked")
+        List<Shop> shops = (List<Shop>) result.getData();
+        assertEquals(Arrays.asList(nearest, farther), shops);
+        assertEquals(120D, shops.get(0).getDistance());
+        assertEquals(860D, shops.get(1).getDistance());
+    }
+
+    @Test
+    void invalidNearbyCoordinateFailsBeforeRedisOrDatabaseQuery() {
+        Result result = shopService.queryShopByType(2, 1, 181D, 31.2D);
+
+        assertFalse(result.getSuccess());
+        assertEquals("经纬度无效", result.getErrorMsg());
+        verifyNoInteractions(shopMapper, stringRedisTemplate);
+    }
+
+    private GeoResult<RedisGeoCommands.GeoLocation<String>> geoResult(Long shopId, double distance) {
+        RedisGeoCommands.GeoLocation<String> location = new RedisGeoCommands.GeoLocation<>(
+                shopId.toString(),
+                new Point(121.5D, 31.2D)
+        );
+        return new GeoResult<>(location, new Distance(distance));
     }
 
     private Shop shop() {
